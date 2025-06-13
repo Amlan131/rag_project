@@ -109,4 +109,3 @@ async def health_check():
 async def root():
     return {"message": "IITM RAG API is running", "docs": "/docs"}
 
-
