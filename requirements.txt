@@ -2,7 +2,7 @@ fastapi
 uvicorn
 python-dotenv
 openai
-pinecone-client
+pinecone
 numpy
 tqdm
 pydantic
