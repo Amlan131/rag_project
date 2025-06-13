@@ -14,7 +14,7 @@ import asyncio
 from dotenv import load_dotenv
 
 # Import enhanced embedding functions
-from enhanced_embedding import (
+from embedding import (
     enhanced_semantic_search,
     generate_answer,
     embed_with_retry,
