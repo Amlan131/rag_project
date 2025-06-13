@@ -1,22 +1,29 @@
 import os
-import asyncio
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
+import asyncio
 from dotenv import load_dotenv
 
+# Import your existing RAG functions
 from embedding import (
     enhanced_semantic_search,
     generate_answer,
+    embed_with_retry,
     test_connection
 )
 
 load_dotenv()
 
-# Request and Response Models
+# Models
+
 class QueryRequest(BaseModel):
     question: str
+    # "discourse", "markdown", or None for both
     source_filter: Optional[str] = None
 
 class LinkInfo(BaseModel):
@@ -34,7 +41,7 @@ app = FastAPI(
     description="API for querying IITM course materials and discussions"
 )
 
-# Enable CORS
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,64 +50,89 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Async wrappers
+# Convert your sync functions to async
+
 async def async_semantic_search(query: str, top_k: int = 5, source_filter=None):
-    return await asyncio.to_thread(enhanced_semantic_search, query, top_k, source_filter)
+    """Async wrapper for your semantic search"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, enhanced_semantic_search, query, top_k, source_filter)
 
 async def async_generate_answer(query: str, context_texts: List[str]):
-    return await asyncio.to_thread(generate_answer, query, context_texts)
+    """Async wrapper for your answer generation"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, generate_answer, query, context_texts)
 
 def extract_links_from_results(results):
+    """Extract links from search results"""
     links = []
     for result in results:
         if result['source_type'] == 'discourse':
-            url = f"https://discourse.onlinedegree.iitm.ac.in/t/{result.get('topic_id', '')}/{result.get('root_post_number', '')}"
+            # Create discourse URL
+            topic_id = result.get('topic_id', '')
+            post_number = result.get('root_post_number', '')
+            url = f"https://discourse.onlinedegree.iitm.ac.in/t/{topic_id}/{post_number}"
             text = result.get('topic_title', 'Discourse Discussion')[:100]
-        else:
+        else:  # markdown
             url = result.get('original_url', '#')
             text = result.get('title', 'Course Material')[:100]
 
         if url and url != '#':
             links.append({"url": url, "text": text})
+
     return links
 
-# Main RAG endpoint
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query")
 async def query_rag_system(request: QueryRequest):
     try:
-        results = await async_semantic_search(request.question, top_k=5, source_filter=request.source_filter)
+        # Perform semantic search
+        results = await async_semantic_search(
+            request.question,
+            top_k=5,
+            source_filter=request.source_filter
+        )
 
         if not results:
-            return QueryResponse(
-                answer="I couldn't find any relevant information in the knowledge base.",
-                links=[],
-                source_breakdown={"discourse": 0, "markdown": 0}
-            )
+            response = {
+                "answer": "I couldn't find any relevant information in the knowledge base.",
+                "links": [],
+                "source_breakdown": {"discourse": 0, "markdown": 0}
+            }
+            return JSONResponse(content=jsonable_encoder(response))
 
-        context_texts = [r["combined_text"] for r in results]
+        # Generate answer
+        context_texts = [res["combined_text"] for res in results]
         answer = await async_generate_answer(request.question, context_texts)
+
+        # Extract links
         links = extract_links_from_results(results)
 
+        # Count sources
         source_breakdown = {"discourse": 0, "markdown": 0}
-        for r in results:
-            src = r.get('source_type', 'discourse')
-            if src in source_breakdown:
-                source_breakdown[src] += 1
+        for result in results:
+            source_type = result.get('source_type', 'discourse')
+            source_breakdown[source_type] += 1
 
-        return QueryResponse(answer=answer, links=links, source_breakdown=source_breakdown)
+        response = {
+            "answer": answer,
+            "links": links,
+            "source_breakdown": source_breakdown
+        }
+        return JSONResponse(content=jsonable_encoder(response))
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing query: {str(e)}"
+        )
 
-# Health check
 @app.get("/health")
 async def health_check():
     try:
-        connected = test_connection()
+        # Test your connections
+        connection_status = test_connection()
         return {
-            "status": "healthy" if connected else "degraded",
+            "status": "healthy" if connection_status else "degraded",
             "openai_proxy": "connected",
-            "pinecone": "connected" if connected else "error"
+            "pinecone": "connected" if connection_status else "error"
         }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
@@ -109,3 +141,7 @@ async def health_check():
 async def root():
     return {"message": "IITM RAG API is running", "docs": "/docs"}
 
+# For Vercel or local development
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
