@@ -1,6 +1,9 @@
 import os
 import json
 import re
+import time
+import base64
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,6 +18,7 @@ from embedding import (
     enhanced_semantic_search,
     generate_answer,
     embed_with_retry,
+    embed_image_with_retry,
     test_connection
 )
 
@@ -24,8 +28,9 @@ load_dotenv()
 
 class QueryRequest(BaseModel):
     question: str
-    # "discourse", "markdown", or None for both
     source_filter: Optional[str] = None
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
 
 class LinkInfo(BaseModel):
     url: str
@@ -53,10 +58,12 @@ app.add_middleware(
 
 # Convert your sync functions to async
 
-async def async_semantic_search(query: str, top_k: int = 5, source_filter=None):
-    """Async wrapper for your semantic search"""
+async def async_semantic_search(query: str, top_k: int = 5, source_filter=None, image_url=None, image_base64=None):
+    """Async wrapper for your semantic search, now supports images"""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, enhanced_semantic_search, query, top_k, source_filter)
+    return await loop.run_in_executor(
+        None, enhanced_semantic_search, query, top_k, source_filter, image_url, image_base64
+    )
 
 async def async_generate_answer(query: str, context_texts: List[str]):
     """Async wrapper for your answer generation"""
@@ -73,6 +80,9 @@ def extract_links_from_results(results):
             post_number = result.get('root_post_number', '')
             url = f"https://discourse.onlinedegree.iitm.ac.in/t/{topic_id}/{post_number}"
             text = result.get('topic_title', 'Discourse Discussion')[:100]
+        elif result['source_type'] == 'image':
+            url = result.get('image_url', '#')
+            text = result.get('title', 'Image')[:100]
         else:  # markdown
             url = result.get('original_url', '#')
             text = result.get('title', 'Course Material')[:100]
@@ -102,14 +112,16 @@ async def query_rag_system(request: QueryRequest):
         results = await async_semantic_search(
             request.question,
             top_k=5,
-            source_filter=request.source_filter
+            source_filter=request.source_filter,
+            image_url=request.image_url,
+            image_base64=request.image_base64
         )
 
         if not results:
             response = {
                 "answer": "I couldn't find any relevant information in the knowledge base.",
                 "links": [],
-                "source_breakdown": {"discourse": 0, "markdown": 0}
+                "source_breakdown": {"discourse": 0, "markdown": 0, "image": 0}
             }
             return JSONResponse(content=jsonable_encoder(response))
 
@@ -121,9 +133,11 @@ async def query_rag_system(request: QueryRequest):
         links_from_answer = extract_links_from_answer(answer)
         links = merge_links(links_from_results, links_from_answer)
 
-        source_breakdown = {"discourse": 0, "markdown": 0}
+        source_breakdown = {"discourse": 0, "markdown": 0, "image": 0}
         for result in results:
             source_type = result.get('source_type', 'discourse')
+            if source_type not in source_breakdown:
+                source_breakdown[source_type] = 0
             source_breakdown[source_type] += 1
 
         response = {
