@@ -11,13 +11,5 @@
       "src": "/(.*)",
       "dest": "main.py"
     }
-  ],
-  "env": {
-    "PYTHONPATH": "."
-  },
-  "functions": {
-    "main.py": {
-      "maxDuration": 30
-    }
-  }
+  ]
 }
