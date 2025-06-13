@@ -3,12 +3,4 @@ uvicorn
 python-dotenv
 openai
 pinecone
-numpy
-tqdm
 pydantic
-aiohttp
-beautifulsoup4
-html2text
-markdown
-python-multipart
-setuptools
