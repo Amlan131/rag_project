@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -63,11 +64,11 @@ async def async_generate_answer(query: str, context_texts: List[str]):
     return await loop.run_in_executor(None, generate_answer, query, context_texts)
 
 def extract_links_from_results(results):
-    """Extract links from search results"""
+    """Extract unique links from search results"""
     links = []
+    seen = set()
     for result in results:
         if result['source_type'] == 'discourse':
-            # Create discourse URL
             topic_id = result.get('topic_id', '')
             post_number = result.get('root_post_number', '')
             url = f"https://discourse.onlinedegree.iitm.ac.in/t/{topic_id}/{post_number}"
@@ -75,16 +76,29 @@ def extract_links_from_results(results):
         else:  # markdown
             url = result.get('original_url', '#')
             text = result.get('title', 'Course Material')[:100]
-
-        if url and url != '#':
+        if url and url != '#' and url not in seen:
             links.append({"url": url, "text": text})
-
+            seen.add(url)
     return links
+
+def extract_links_from_answer(answer):
+    """Extract markdown links from the answer text."""
+    pattern = r'\[([^\]]+)\]\((https?://[^\)]+)\)'
+    return [{"url": url, "text": text} for text, url in re.findall(pattern, answer)]
+
+def merge_links(links1, links2):
+    """Merge two lists of links, avoiding duplicates by URL."""
+    seen = set()
+    merged = []
+    for link in links1 + links2:
+        if link['url'] not in seen:
+            merged.append(link)
+            seen.add(link['url'])
+    return merged
 
 @app.post("/query")
 async def query_rag_system(request: QueryRequest):
     try:
-        # Perform semantic search
         results = await async_semantic_search(
             request.question,
             top_k=5,
@@ -99,14 +113,14 @@ async def query_rag_system(request: QueryRequest):
             }
             return JSONResponse(content=jsonable_encoder(response))
 
-        # Generate answer
         context_texts = [res["combined_text"] for res in results]
         answer = await async_generate_answer(request.question, context_texts)
 
-        # Extract links
-        links = extract_links_from_results(results)
+        # Extract links from results and answer, then merge
+        links_from_results = extract_links_from_results(results)
+        links_from_answer = extract_links_from_answer(answer)
+        links = merge_links(links_from_results, links_from_answer)
 
-        # Count sources
         source_breakdown = {"discourse": 0, "markdown": 0}
         for result in results:
             source_type = result.get('source_type', 'discourse')
@@ -127,7 +141,6 @@ async def query_rag_system(request: QueryRequest):
 @app.get("/health")
 async def health_check():
     try:
-        # Test your connections
         connection_status = test_connection()
         return {
             "status": "healthy" if connection_status else "degraded",
